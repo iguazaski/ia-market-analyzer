@@ -207,7 +207,12 @@ def buscar_negocios(api_key, nicho, ubicacion):
     try:
         resp = requests.get(url, params=params, timeout=10)
         resp.raise_for_status()
-        return resp.json().get("results", [])
+        data = resp.json()
+        status = data.get("status", "")
+        if status not in ("OK", "ZERO_RESULTS"):
+            st.error(f"Error Google Places API: {status} — {data.get('error_message', 'Sin detalles')}")
+            return []
+        return data.get("results", [])
     except Exception as e:
         st.error(f"Error Google Maps: {e}")
         return []
@@ -583,17 +588,13 @@ def tab_analizar(mods):
         ubicacion = st.text_input("📍 Ciudad", placeholder="Madrid, Barcelona, CDMX…")
 
     if demo:
-        st.info("🎯 **Modo Demo** — mostrando datos de ejemplo. Configura tus API keys en Replit Secrets para datos reales.")
+        st.info("🎯 **Modo Demo** — mostrando datos de ejemplo. Configura tus API keys en Streamlit Secrets para datos reales.")
 
     if not st.button("🚀 Analizar Mercado", type="primary", use_container_width=True):
         return
     if not nicho or not ubicacion:
         st.warning("Escribe un nicho y una ciudad.")
         return
-
-    # Incrementar uso (solo usuarios free reales)
-    if plan == "free" and uid > 0:
-        increment_usage(uid)
 
     ai_text = ""
     keywords = []
@@ -604,6 +605,10 @@ def tab_analizar(mods):
         if not negocios:
             st.error("No se encontraron resultados. Prueba con otro nicho o ciudad.")
             return
+
+    # Incrementar uso solo cuando hay resultados reales
+    if plan == "free" and uid > 0:
+        increment_usage(uid)
 
     # ── Competidores ──────────────────────────
     if mods["competidores"]:
