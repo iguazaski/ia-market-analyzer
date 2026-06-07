@@ -50,7 +50,7 @@ st.markdown("""
 # ─────────────────────────────────────────────
 #  BASE DE DATOS SQLite
 # ─────────────────────────────────────────────
-DB_PATH = "users.db"
+DB_PATH = "/tmp/users.db"
 
 def init_db():
     con = sqlite3.connect(DB_PATH)
