@@ -85,6 +85,15 @@ def init_db():
         )
     """)
     con.commit()
+    # Auto-seed propietario/admin en cada arranque
+    _admin_pw = os.environ.get("ADMIN_PASSWORD", "Admin2024!IA")
+    _pw_hash = hashlib.sha256(_admin_pw.encode()).hexdigest()
+    con.execute(
+        "INSERT OR IGNORE INTO users (email, name, password, plan) VALUES (?,?,?,?)",
+        ("icdvillar8@gmail.com", "Carlos", _pw_hash, "admin")
+    )
+    con.execute("UPDATE users SET plan=\'admin\' WHERE email=\'icdvillar8@gmail.com\'")
+    con.commit()
     con.close()
 
 def hash_password(pw: str) -> str:
@@ -487,7 +496,7 @@ def render_sidebar():
     with st.sidebar:
         user = st.session_state.get("user_name", "")
         plan = st.session_state.get("user_plan", "free")
-        badge = "🆓 Free" if plan == "free" else ("✨ PRO" if plan == "pro" else "🎯 Demo")
+        badge = "🆓 Free" if plan == "free" else ("👑 Admin" if plan == "admin" else ("✨ PRO" if plan == "pro" else "🎯 Demo"))
         st.markdown(f"### Hola, {user} {badge}")
         if plan == "free":
             used = get_daily_usage(st.session_state.user_id)
@@ -496,7 +505,7 @@ def render_sidebar():
             st.caption(f"{remaining} análisis restantes hoy")
             if remaining == 0:
                 st.warning("Límite diario alcanzado.")
-        if plan != "pro" and plan != "demo":
+        if plan not in ("pro", "admin", "demo"):
             if st.button("⚡ Actualizar a PRO — €29/mes", use_container_width=True, type="primary"):
                 st.session_state.show_upgrade = True
                 st.rerun()
@@ -613,6 +622,8 @@ Detectamos brechas, keywords y oportunidades concretas.""")
 
     if plan == "free":
         st.info(f"🆓 Plan Free: {FREE_LIMIT} análisis gratis al día. Actualiza a PRO para acceso ilimitado + IA.")
+    elif plan == "admin":
+        st.success("👑 Admin — Acceso completo y sin límites.")
     elif plan == "pro":
         st.success("✨ Plan PRO activo — Acceso ilimitado a todos los módulos.")
 
@@ -760,7 +771,7 @@ def tab_analizar(mods):
 
     # ── Análisis IA ──────────────────────────
     if mods["analisis_ia"]:
-        if plan not in ["pro", "demo"] and not o_key:
+        if plan not in ["pro", "admin", "demo"] and not o_key:
             st.warning("🔒 El análisis IA es exclusivo del plan PRO.")
         else:
             st.markdown("### 🤖 Análisis IA de Mercado")
@@ -849,7 +860,7 @@ va a cadenas internacionales."""
         })
 
     # ── Exportar HTML ──────────────────────────
-    if plan in ["pro"] or demo:
+    if plan in ["pro", "admin"] or demo:
         st.markdown("---")
         st.markdown("### 📥 Exportar Reporte")
         brechas_exp = detectar_brechas(calcular_scores(negocios),
