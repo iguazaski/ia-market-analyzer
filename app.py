@@ -245,40 +245,68 @@ def _get_osm_tags(nicho: str) -> list[str]:
 OVERPASS_MIRRORS = [
     "https://overpass-api.de/api/interpreter",
     "https://overpass.kumi.systems/api/interpreter",
-    "https://overpass.openstreetmap.ru/api/interpreter",
 ]
 
-def buscar_negocios(nicho: str, ubicacion: str) -> list:
-    """Busca negocios usando OpenStreetMap Overpass API — gratuito, sin billing."""
-    osm_tags = _get_osm_tags(nicho)
-    union_parts = "\n  ".join(f"{tag}(area.searchArea);" for tag in osm_tags)
+def _get_bbox(city: str) -> tuple | None:
+    """Obtiene bounding box de una ciudad via Nominatim (gratuito, sin API key)."""
+    try:
+        resp = requests.get(
+            "https://nominatim.openstreetmap.org/search",
+            params={"q": city, "format": "json", "limit": 1},
+            headers={"User-Agent": "IA-Market-Analyzer/1.0 (streamlit app)"},
+            timeout=10
+        )
+        resp.raise_for_status()
+        results = resp.json()
+        if not results:
+            return None
+        bb = results[0]["boundingbox"]  # [south, north, west, east]
+        return float(bb[0]), float(bb[2]), float(bb[1]), float(bb[3])  # s, w, n, e
+    except Exception:
+        return None
 
-    def _query(city_name: str) -> list:
-        q = f"""[out:json][timeout:25];
-area[name="{city_name}"]->.searchArea;
+
+def buscar_negocios(nicho: str, ubicacion: str) -> list:
+    """Busca negocios usando OpenStreetMap Overpass API — gratuito, sin billing.
+    Usa bounding box vía Nominatim para mayor fiabilidad."""
+    osm_tags = _get_osm_tags(nicho)
+
+    # 1. Obtener bounding box de la ciudad
+    bbox = _get_bbox(ubicacion)
+    if bbox is None:
+        st.error(f"No se encontró '{ubicacion}' en el mapa. Prueba con el nombre completo de la ciudad.")
+        return []
+
+    south, west, north, east = bbox
+    bbox_str = f"{south},{west},{north},{east}"
+
+    # 2. Construir query Overpass con bbox (más rápido que area[name=...])
+    union_parts = "\n  ".join(f"{tag}({bbox_str});" for tag in osm_tags)
+    query = f"""[out:json][timeout:25];
 (
   {union_parts}
 );
 out body;"""
-        last_err = None
-        for mirror in OVERPASS_MIRRORS:
-            try:
-                # GET con params es más compatible entre mirrors
-                resp = requests.get(mirror, params={"data": q}, timeout=30)
-                resp.raise_for_status()
-                return resp.json().get("elements", [])
-            except Exception as e:
-                last_err = e
-                continue
-        raise last_err
 
-    try:
-        elements = _query(ubicacion)
-        # Fallback: intentar con capital de la provincia
-        if not elements and "," in ubicacion:
-            elements = _query(ubicacion.split(",")[0].strip())
-    except Exception as e:
-        st.error(f"Error buscando negocios en OpenStreetMap: {e}")
+    # 3. Llamar a Overpass con POST raw body (más compatible)
+    last_err = None
+    for mirror in OVERPASS_MIRRORS:
+        try:
+            resp = requests.post(
+                mirror,
+                data=query.encode("utf-8"),
+                headers={"Content-Type": "text/plain"},
+                timeout=30
+            )
+            resp.raise_for_status()
+            elements = resp.json().get("elements", [])
+            break
+        except Exception as e:
+            last_err = e
+            elements = []
+            continue
+    else:
+        st.error(f"Error conectando con OpenStreetMap: {last_err}")
         return []
 
     if not elements:
