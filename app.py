@@ -194,157 +194,119 @@ DEMO_KEYWORDS = [
 #  MÓDULOS DE ANÁLISIS
 # ─────────────────────────────────────────────
 
-# Mapa de nichos a tags OpenStreetMap
-OSM_TAG_MAP = {
-    ("restaurante", "comida", "cocina", "gastro", "comer"):
-        ["node[amenity=restaurant]", "way[amenity=restaurant]"],
-    ("hamburgues", "burger", "smash"):
-        ["node[amenity=fast_food][cuisine=burger]", "node[amenity=restaurant][cuisine=burger]", "node[amenity=fast_food]"],
-    ("café", "cafetería", "cafeteria", "coffee", "desayuno"):
-        ["node[amenity=cafe]", "way[amenity=cafe]"],
-    ("pizza", "pizzería", "pizzeria"):
-        ["node[amenity=restaurant][cuisine=pizza]", "node[amenity=fast_food][cuisine=pizza]"],
-    ("gimnasio", "gym", "fitness", "crossfit", "pilates", "yoga"):
-        ["node[leisure=fitness_centre]", "node[leisure=sports_centre]", "way[leisure=fitness_centre]"],
-    ("hotel", "hostal", "alojamiento", "pensión", "pension", "apartamento"):
-        ["node[tourism=hotel]", "node[tourism=hostel]", "node[tourism=guest_house]"],
-    ("farmacia",):
-        ["node[amenity=pharmacy]"],
-    ("bar", "cervecería", "pub", "tapas", "taberna", "bodega"):
-        ["node[amenity=bar]", "node[amenity=pub]"],
-    ("peluquería", "peluqueria", "barbería", "barberia", "estética", "estetica", "belleza"):
-        ["node[shop=hairdresser]", "node[shop=beauty]", "node[shop=barber]"],
-    ("supermercado", "alimentación", "mercado"):
-        ["node[shop=supermarket]", "node[shop=convenience]"],
-    ("clínica", "clinica", "médico", "medico", "salud"):
-        ["node[amenity=clinic]", "node[amenity=doctors]"],
-    ("dentista", "dental"):
-        ["node[amenity=dentist]"],
-    ("veterinario", "veterinaria"):
-        ["node[amenity=veterinary]"],
-    ("panadería", "panaderia", "pastelería", "pasteleria", "repostería"):
-        ["node[shop=bakery]", "node[shop=pastry]"],
-    ("ropa", "moda", "tienda ropa"):
-        ["node[shop=clothes]"],
-    ("librería", "libreria", "libros"):
-        ["node[shop=books]"],
-    ("floristería", "floristeria", "flores"):
-        ["node[shop=florist]"],
+
+# Mapa nicho → osm_tag para Photon API (key:value)
+PHOTON_TAG_MAP = {
+    ("restaurante", "comida", "cocina", "gastro", "comer"): "amenity:restaurant",
+    ("hamburgues", "burger", "smash", "fast food"): "amenity:fast_food",
+    ("café", "cafetería", "cafeteria", "coffee", "desayuno"): "amenity:cafe",
+    ("pizza", "pizzería", "pizzeria"): "amenity:restaurant",
+    ("gimnasio", "gym", "fitness", "crossfit", "pilates", "yoga"): "leisure:fitness_centre",
+    ("hotel", "hostal", "alojamiento", "pensión", "pension"): "tourism:hotel",
+    ("farmacia",): "amenity:pharmacy",
+    ("bar", "cervecería", "pub", "tapas", "taberna", "bodega"): "amenity:bar",
+    ("peluquería", "peluqueria", "barbería", "barberia", "belleza"): "shop:hairdresser",
+    ("supermercado", "alimentación", "mercado"): "shop:supermarket",
+    ("dentista", "dental"): "amenity:dentist",
+    ("veterinario", "veterinaria"): "amenity:veterinary",
+    ("panadería", "panaderia", "pastelería", "pasteleria"): "shop:bakery",
+    ("ropa", "moda"): "shop:clothes",
+    ("librería", "libreria", "libros"): "shop:books",
+    ("floristería", "floristeria", "flores"): "shop:florist",
 }
 
-def _get_osm_tags(nicho: str) -> list[str]:
-    """Mapea un nicho en español a tags OSM."""
+def _get_photon_tag(nicho: str) -> str:
     nicho_lower = nicho.lower()
-    for keywords, tags in OSM_TAG_MAP.items():
+    for keywords, tag in PHOTON_TAG_MAP.items():
         if any(kw in nicho_lower for kw in keywords):
-            return tags
-    # Fallback genérico: buscar por nombre
-    return [f'node[name~"{nicho}",i]', f'way[name~"{nicho}",i]']
+            return tag
+    return ""   # sin filtro → búsqueda por nombre libre
 
 
-OVERPASS_MIRRORS = [
-    "https://overpass-api.de/api/interpreter",
-    "https://overpass.kumi.systems/api/interpreter",
-]
-
-def _get_bbox(city: str) -> tuple | None:
-    """Obtiene bounding box de una ciudad via Nominatim (gratuito, sin API key)."""
+def _get_city_center(city: str) -> tuple | None:
+    """Latitud/longitud del centro de la ciudad vía Nominatim."""
     try:
         resp = requests.get(
             "https://nominatim.openstreetmap.org/search",
             params={"q": city, "format": "json", "limit": 1},
-            headers={"User-Agent": "IA-Market-Analyzer/1.0 (streamlit app)"},
+            headers={"User-Agent": "IA-Market-Analyzer/1.0"},
             timeout=10
         )
         resp.raise_for_status()
         results = resp.json()
         if not results:
             return None
-        bb = results[0]["boundingbox"]  # [south, north, west, east]
-        return float(bb[0]), float(bb[2]), float(bb[1]), float(bb[3])  # s, w, n, e
+        return float(results[0]["lat"]), float(results[0]["lon"])
     except Exception:
         return None
 
 
 def buscar_negocios(nicho: str, ubicacion: str) -> list:
-    """Busca negocios usando OpenStreetMap Overpass API — gratuito, sin billing.
-    Usa bounding box vía Nominatim para mayor fiabilidad."""
-    osm_tags = _get_osm_tags(nicho)
+    """Busca negocios usando Photon (komoot) — basado en OSM, gratuito, sin API key."""
+    # 1. Centro de la ciudad
+    center = _get_city_center(ubicacion)
+    if center is None:
+        st.error(f"No se encontró '{ubicacion}'. Prueba con el nombre completo de la ciudad.")
+        return []
+    lat, lon = center
 
-    # 1. Obtener bounding box de la ciudad
-    bbox = _get_bbox(ubicacion)
-    if bbox is None:
-        st.error(f"No se encontró '{ubicacion}' en el mapa. Prueba con el nombre completo de la ciudad.")
+    # 2. Buscar con Photon
+    photon_tag = _get_photon_tag(nicho)
+    params: dict = {"q": nicho, "lat": lat, "lon": lon, "limit": 50, "lang": "es"}
+    if photon_tag:
+        params["osm_tag"] = photon_tag
+
+    try:
+        resp = requests.get(
+            "https://photon.komoot.io/api/",
+            params=params,
+            timeout=15
+        )
+        resp.raise_for_status()
+        features = resp.json().get("features", [])
+    except Exception as e:
+        st.error(f"Error buscando negocios: {e}")
         return []
 
-    south, west, north, east = bbox
-    bbox_str = f"{south},{west},{north},{east}"
-
-    # 2. Construir query Overpass con bbox (más rápido que area[name=...])
-    union_parts = "\n  ".join(f"{tag}({bbox_str});" for tag in osm_tags)
-    query = f"""[out:json][timeout:25];
-(
-  {union_parts}
-);
-out body;"""
-
-    # 3. Llamar a Overpass con POST raw body (más compatible)
-    last_err = None
-    for mirror in OVERPASS_MIRRORS:
-        try:
-            resp = requests.post(
-                mirror,
-                data=query.encode("utf-8"),
-                headers={"Content-Type": "text/plain"},
-                timeout=30
-            )
-            resp.raise_for_status()
-            elements = resp.json().get("elements", [])
-            break
-        except Exception as e:
-            last_err = e
-            elements = []
-            continue
-    else:
-        st.error(f"Error conectando con OpenStreetMap: {last_err}")
+    if not features:
+        st.warning(f"No se encontraron negocios de '{nicho}' en '{ubicacion}'. "
+                   "Prueba con un nicho más genérico (ej: 'restaurante', 'bar').")
         return []
 
-    if not elements:
-        st.warning(f"OpenStreetMap no encontró negocios de '{nicho}' en '{ubicacion}'. "
-                   "Prueba con una ciudad más grande o un nicho más genérico (ej: 'restaurante').")
-        return []
-
+    # Parsear formato GeoJSON de Photon
     negocios = []
     seen = set()
-    for el in elements:
-        tags = el.get("tags", {})
-        name = tags.get("name")
+    for feat in features:
+        props = feat.get("properties", {})
+        name = props.get("name")
         if not name or name in seen:
             continue
         seen.add(name)
 
-        street = tags.get("addr:street", "")
-        housenumber = tags.get("addr:housenumber", "")
-        postcode = tags.get("addr:postcode", "")
+        street = props.get("street", "")
+        housenumber = props.get("housenumber", "")
+        postcode = props.get("postcode", "")
+        city_prop = props.get("city", ubicacion)
+
         if street:
             addr = f"{street} {housenumber}".strip()
             if postcode:
-                addr += f", {postcode} {ubicacion}"
+                addr += f", {postcode} {city_prop}"
             else:
-                addr += f", {ubicacion}"
+                addr += f", {city_prop}"
         else:
-            addr = ubicacion
+            addr = city_prop
 
+        osm_id = props.get("osm_id", "")
         negocios.append({
             "name": name,
             "vicinity": addr,
             "formatted_address": addr,
-            "rating": None,          # OSM no tiene ratings
+            "rating": None,
             "user_ratings_total": 0,
             "types": [nicho.lower()],
-            "place_id": f"osm_{el.get('id', '')}",
-            "website": tags.get("website", ""),
-            "phone": tags.get("phone", tags.get("contact:phone", "")),
+            "place_id": f"photon_{osm_id}",
+            "website": props.get("website", ""),
         })
 
     return negocios[:20]
