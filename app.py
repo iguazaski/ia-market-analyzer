@@ -372,9 +372,12 @@ def detectar_brechas(scores, trend_data):
         brechas.append("🟢 **Calidad del producto**: Hay margen para posicionarse como referente premium.")
     if avg_scores["Popularidad"] < 50:
         brechas.append("🟢 **Presencia online**: El mercado tiene poca visibilidad digital. Invertir en SEO local y reseñas puede generar ventaja competitiva rápida.")
-    if trend_data and len(trend_data) > 6:
-        vals = list(trend_data.values()) if isinstance(trend_data, dict) else list(trend_data)
-        if vals[-1] > vals[0] * 1.1:
+    if trend_data is not None and len(trend_data) > 6:
+        if isinstance(trend_data, dict):
+            vals = list(trend_data.values())
+        else:
+            vals = trend_data.tolist()
+        if len(vals) > 1 and vals[-1] > vals[0] * 1.1:
             brechas.append("📈 **Demanda creciente**: El interés de búsqueda sube. El mercado tiene viento a favor — buen momento para entrar.")
     if not brechas:
         brechas.append("⚡ Mercado competitivo y equilibrado. La clave es una propuesta de valor única y nicho específico.")
@@ -893,9 +896,4 @@ def main():
         tab_bienvenida()
     with tab_a:
         tab_analizar(mods)
-    with tab_h:
-        tab_historial()
-
-
-if __name__ == "__main__":
-    main()
+   
