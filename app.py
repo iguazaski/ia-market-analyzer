@@ -1,5 +1,5 @@
 """
-IA Market Analyzer — v4 con autenticación
+IA Market Analyzer — v5 con OpenStreetMap (sin billing)
 Freemium SaaS: gratis (3 análisis/día) + PRO €29/mes (ilimitado + IA)
 """
 import streamlit as st
@@ -178,13 +178,6 @@ DEMO_BUSINESSES = [
     {"name": "The American Burger", "rating": 4.4, "user_ratings_total": 748,
      "formatted_address": "Calle Serrano 90, Madrid", "place_id": "demo_5"},
 ]
-DEMO_REVIEWS = [
-    "La hamburguesa estaba muy jugosa pero tardaron 25 minutos. El local es ruidoso.",
-    "Precio muy alto para la cantidad. La carne no era de calidad premium como dicen.",
-    "Sin opciones vegetarianas. Mi pareja no pudo comer nada. Decepcionante.",
-    "El servicio fue lento y el personal poco amable. No repetiremos.",
-    "Buena ubicación pero la presentación del plato deja mucho que desear.",
-]
 DEMO_TRENDS = {
     "ene": 45, "feb": 48, "mar": 52, "abr": 58, "may": 62,
     "jun": 71, "jul": 68, "ago": 65, "sep": 70, "oct": 74,
@@ -201,37 +194,130 @@ DEMO_KEYWORDS = [
 #  MÓDULOS DE ANÁLISIS
 # ─────────────────────────────────────────────
 
-def buscar_negocios(api_key, nicho, ubicacion):
-    url = "https://maps.googleapis.com/maps/api/place/textsearch/json"
-    params = {"query": f"{nicho} en {ubicacion}", "key": api_key, "language": "es"}
-    try:
-        resp = requests.get(url, params=params, timeout=10)
+# Mapa de nichos a tags OpenStreetMap
+OSM_TAG_MAP = {
+    ("restaurante", "comida", "cocina", "gastro", "comer"):
+        ["node[amenity=restaurant]", "way[amenity=restaurant]"],
+    ("hamburgues", "burger", "smash"):
+        ["node[amenity=fast_food][cuisine=burger]", "node[amenity=restaurant][cuisine=burger]", "node[amenity=fast_food]"],
+    ("café", "cafetería", "cafeteria", "coffee", "desayuno"):
+        ["node[amenity=cafe]", "way[amenity=cafe]"],
+    ("pizza", "pizzería", "pizzeria"):
+        ["node[amenity=restaurant][cuisine=pizza]", "node[amenity=fast_food][cuisine=pizza]"],
+    ("gimnasio", "gym", "fitness", "crossfit", "pilates", "yoga"):
+        ["node[leisure=fitness_centre]", "node[leisure=sports_centre]", "way[leisure=fitness_centre]"],
+    ("hotel", "hostal", "alojamiento", "pensión", "pension", "apartamento"):
+        ["node[tourism=hotel]", "node[tourism=hostel]", "node[tourism=guest_house]"],
+    ("farmacia",):
+        ["node[amenity=pharmacy]"],
+    ("bar", "cervecería", "pub", "tapas", "taberna", "bodega"):
+        ["node[amenity=bar]", "node[amenity=pub]"],
+    ("peluquería", "peluqueria", "barbería", "barberia", "estética", "estetica", "belleza"):
+        ["node[shop=hairdresser]", "node[shop=beauty]", "node[shop=barber]"],
+    ("supermercado", "alimentación", "mercado"):
+        ["node[shop=supermarket]", "node[shop=convenience]"],
+    ("clínica", "clinica", "médico", "medico", "salud"):
+        ["node[amenity=clinic]", "node[amenity=doctors]"],
+    ("dentista", "dental"):
+        ["node[amenity=dentist]"],
+    ("veterinario", "veterinaria"):
+        ["node[amenity=veterinary]"],
+    ("panadería", "panaderia", "pastelería", "pasteleria", "repostería"):
+        ["node[shop=bakery]", "node[shop=pastry]"],
+    ("ropa", "moda", "tienda ropa"):
+        ["node[shop=clothes]"],
+    ("librería", "libreria", "libros"):
+        ["node[shop=books]"],
+    ("floristería", "floristeria", "flores"):
+        ["node[shop=florist]"],
+}
+
+def _get_osm_tags(nicho: str) -> list[str]:
+    """Mapea un nicho en español a tags OSM."""
+    nicho_lower = nicho.lower()
+    for keywords, tags in OSM_TAG_MAP.items():
+        if any(kw in nicho_lower for kw in keywords):
+            return tags
+    # Fallback genérico: buscar por nombre
+    return [f'node[name~"{nicho}",i]', f'way[name~"{nicho}",i]']
+
+
+def buscar_negocios(nicho: str, ubicacion: str) -> list:
+    """Busca negocios usando OpenStreetMap Overpass API — gratuito, sin billing."""
+    osm_tags = _get_osm_tags(nicho)
+    union_parts = "\n  ".join(f"{tag}(area.searchArea);" for tag in osm_tags)
+
+    def _query(city_name: str) -> list:
+        q = f"""[out:json][timeout:30];
+area[name="{city_name}"]->.searchArea;
+(
+  {union_parts}
+);
+out body;"""
+        resp = requests.post(
+            "https://overpass-api.de/api/interpreter",
+            data={"data": q},
+            timeout=35
+        )
         resp.raise_for_status()
-        data = resp.json()
-        status = data.get("status", "")
-        if status not in ("OK", "ZERO_RESULTS"):
-            st.error(f"Error Google Places API: {status} — {data.get('error_message', 'Sin detalles')}")
-            return []
-        return data.get("results", [])
+        return resp.json().get("elements", [])
+
+    try:
+        elements = _query(ubicacion)
+        # Fallback: intentar con capital de la provincia
+        if not elements and "," in ubicacion:
+            elements = _query(ubicacion.split(",")[0].strip())
     except Exception as e:
-        st.error(f"Error Google Maps: {e}")
+        st.error(f"Error buscando negocios en OpenStreetMap: {e}")
         return []
 
-def obtener_resenas(api_key, place_id):
-    url = "https://maps.googleapis.com/maps/api/place/details/json"
-    params = {"place_id": place_id, "fields": "reviews", "key": api_key, "language": "es"}
-    try:
-        resp = requests.get(url, params=params, timeout=10)
-        reviews = resp.json().get("result", {}).get("reviews", [])
-        return [r.get("text", "") for r in reviews if r.get("text")]
-    except Exception:
+    if not elements:
+        st.warning(f"OpenStreetMap no encontró negocios de '{nicho}' en '{ubicacion}'. "
+                   "Prueba con una ciudad más grande o un nicho más genérico (ej: 'restaurante').")
         return []
+
+    negocios = []
+    seen = set()
+    for el in elements:
+        tags = el.get("tags", {})
+        name = tags.get("name")
+        if not name or name in seen:
+            continue
+        seen.add(name)
+
+        street = tags.get("addr:street", "")
+        housenumber = tags.get("addr:housenumber", "")
+        postcode = tags.get("addr:postcode", "")
+        if street:
+            addr = f"{street} {housenumber}".strip()
+            if postcode:
+                addr += f", {postcode} {ubicacion}"
+            else:
+                addr += f", {ubicacion}"
+        else:
+            addr = ubicacion
+
+        negocios.append({
+            "name": name,
+            "vicinity": addr,
+            "formatted_address": addr,
+            "rating": None,          # OSM no tiene ratings
+            "user_ratings_total": 0,
+            "types": [nicho.lower()],
+            "place_id": f"osm_{el.get('id', '')}",
+            "website": tags.get("website", ""),
+            "phone": tags.get("phone", tags.get("contact:phone", "")),
+        })
+
+    return negocios[:20]
+
 
 def obtener_tendencias(nicho, ubicacion):
     try:
         from pytrends.request import TrendReq
         pytrends = TrendReq(hl='es', tz=360, timeout=(10, 25))
         geo_map = {"madrid": "ES-MD", "barcelona": "ES-CT", "sevilla": "ES-AN",
+                   "valladolid": "ES-CL", "bilbao": "ES-PV", "zaragoza": "ES-AR",
                    "españa": "ES", "mexico": "MX", "colombia": "CO",
                    "argentina": "AR", "chile": "CL"}
         geo = next((v for k, v in geo_map.items() if k in ubicacion.lower()), "ES")
@@ -248,17 +334,24 @@ def obtener_tendencias(nicho, ubicacion):
     except Exception:
         return None, []
 
-def analizar_con_ia(client, nicho, reviews):
-    texto = "\n".join(f"- {r}" for r in reviews[:15])
-    prompt = f"""Analiza estas reseñas de negocios de {nicho}:
-{texto}
 
-Proporciona en español:
-1. PUNTOS DE DOLOR principales (3 bullets)
-2. OPORTUNIDADES DE MERCADO detectadas (3 bullets)
-3. RECOMENDACIÓN ESTRATÉGICA (2-3 frases)
+def analizar_con_ia(client, nicho, ubicacion, negocios_list):
+    """Analiza el mercado usando la lista de negocios encontrados."""
+    nombres = [n["name"] for n in negocios_list[:15]]
+    nombres_str = "\n".join(f"- {n}" for n in nombres) if nombres else "(sin datos)"
 
-Sé directo y accionable."""
+    prompt = f"""Analiza el mercado de '{nicho}' en {ubicacion}.
+
+Competidores encontrados ({len(nombres)}):
+{nombres_str}
+
+Proporciona en español un análisis estratégico con:
+1. PUNTOS DE DOLOR principales del sector (3 bullets)
+2. OPORTUNIDADES DE MERCADO para un nuevo entrante (3 bullets)
+3. RECOMENDACIÓN ESTRATÉGICA para diferenciarse (2-3 frases)
+
+Sé específico para {ubicacion} y el sector {nicho}. Sé directo y accionable."""
+
     try:
         resp = client.chat.completions.create(
             model="gpt-4o-mini",
@@ -269,22 +362,24 @@ Sé directo y accionable."""
     except Exception as e:
         return f"Error IA: {e}"
 
+
 def calcular_scores(negocios):
     scores = []
-    max_reviews = max((n.get("user_ratings_total", 0) for n in negocios), default=1) or 1
+    max_reviews = max((n.get("user_ratings_total", 0) or 0 for n in negocios), default=1) or 1
     for i, n in enumerate(negocios[:8]):
-        r = n.get("rating", 3.0) or 3.0
+        r = n.get("rating") or 3.5     # Default razonable si OSM no tiene rating
         rev = n.get("user_ratings_total", 0) or 0
         scores.append({
             "name": n["name"][:25],
             "Calidad":      round(r * 20),
-            "Popularidad":  round((rev / max_reviews) * 100),
+            "Popularidad":  round((rev / max_reviews) * 100) if max_reviews > 0 else 50,
             "Visibilidad":  min(100, 40 + i * 8),
             "Madurez":      min(100, 30 + rev // 20),
             "Servicio":     round((r - 1) / 4 * 100),
-            "Amenaza":      round(((r * 20) + (rev / max_reviews * 100)) / 2),
+            "Amenaza":      round(((r * 20) + (rev / max_reviews * 100 if max_reviews > 0 else 50)) / 2),
         })
     return scores
+
 
 def detectar_brechas(scores, trend_data):
     avg_scores = {k: sum(s[k] for s in scores) / len(scores)
@@ -304,10 +399,11 @@ def detectar_brechas(scores, trend_data):
         brechas.append("⚡ Mercado competitivo y equilibrado. La clave es una propuesta de valor única y nicho específico.")
     return brechas
 
+
 def generar_reporte_html(nicho, ubicacion, negocios, ai_text, trend_vals, brechas, keywords):
-    rows = "".join(f"<tr><td>{n['name']}</td><td>⭐ {n.get('rating','N/A')}</td>"
-                   f"<td>{n.get('user_ratings_total',0):,}</td>"
-                   f"<td>{n.get('formatted_address','')}</td></tr>"
+    rows = "".join(f"<tr><td>{n['name']}</td><td>⭐ {n.get('rating') or 'N/A'}</td>"
+                   f"<td>{n.get('user_ratings_total', 0):,}</td>"
+                   f"<td>{n.get('formatted_address', '')}</td></tr>"
                    for n in negocios[:10])
     brechas_html = "".join(f"<li>{b}</li>" for b in brechas)
     kw_html = "".join(f"<li>{k[0]} — {k[1]} pts</li>" for k in keywords[:6]) if keywords else "<li>N/D</li>"
@@ -323,7 +419,7 @@ th{{background:#1a1a2e;color:white;padding:.6rem}}td{{padding:.5rem;border-botto
 <h1>📊 IA Market Analyzer</h1>
 <p><strong>Nicho:</strong> {nicho} &nbsp;|&nbsp; <strong>Ubicación:</strong> {ubicacion}
 &nbsp;|&nbsp; <strong>Fecha:</strong> {datetime.date.today()}</p>
-<h2>🏢 Competidores</h2>
+<h2>🏢 Competidores (OpenStreetMap)</h2>
 <table><tr><th>Nombre</th><th>Rating</th><th>Reseñas</th><th>Dirección</th></tr>{rows}</table>
 <h2>🔍 Brechas de Mercado</h2><ul>{"".join(f'<li class=brecha>{b}</li>' for b in brechas)}</ul>
 <h2>🔑 Keywords Relacionadas</h2><ul>{kw_html}</ul>
@@ -332,7 +428,7 @@ th{{background:#1a1a2e;color:white;padding:.6rem}}td{{padding:.5rem;border-botto
 
 
 # ─────────────────────────────────────────────
-#  PÁGINAS DE AUTH
+#  PÁGINAS DE AUTH (con st.form para fiabilidad)
 # ─────────────────────────────────────────────
 
 def pagina_login():
@@ -367,6 +463,7 @@ def pagina_login():
         st.session_state.logged_in = True
         st.rerun()
     st.markdown('</div>', unsafe_allow_html=True)
+
 
 def pagina_registro():
     st.markdown('<div class="auth-box">', unsafe_allow_html=True)
@@ -420,11 +517,15 @@ def render_sidebar():
                 st.session_state.show_upgrade = True
                 st.rerun()
         st.markdown("---")
-        st.markdown("**API Keys**")
-        g_key = os.getenv("GOOGLE_API_KEY", "")
+        st.markdown("**Fuentes de datos**")
+        st.success("✅ OpenStreetMap (negocios)")
         o_key = os.getenv("OPENAI_API_KEY", "")
-        st.success("✅ Google API" if g_key else "❌ Google API (no configurada)")
         st.success("✅ OpenAI API" if o_key else "❌ OpenAI API (no configurada)")
+        try:
+            from pytrends.request import TrendReq
+            st.success("✅ Google Trends")
+        except Exception:
+            st.warning("⚠️ Google Trends (pytrends no disponible)")
         st.markdown("---")
         st.markdown("**Módulos**")
         mods = {
@@ -504,14 +605,14 @@ def tab_bienvenida():
     <div class="hero-card">
       <h1 style="color:white;font-size:2.2rem;margin-bottom:.5rem">📊 IA Market Analyzer</h1>
       <p style="color:#aaa;font-size:1.1rem">Analiza cualquier nicho de mercado en segundos.<br>
-      Datos reales de Google Maps · Tendencias · Inteligencia Artificial.</p>
+      Datos reales de OpenStreetMap · Tendencias · Inteligencia Artificial.</p>
     </div>
     """, unsafe_allow_html=True)
 
     c1, c2, c3 = st.columns(3)
-    c1.metric("🏢 Competidores", "Datos reales", "Google Maps")
+    c1.metric("🏢 Competidores", "Datos reales", "OpenStreetMap")
     c2.metric("📈 Tendencias", "12 meses", "Google Trends")
-    c3.metric("🤖 IA", "GPT-4o-mini", "Análisis reseñas")
+    c3.metric("🤖 IA", "GPT-4o-mini", "Análisis de mercado")
 
     st.markdown("---")
     st.markdown("### ¿Cómo funciona?")
@@ -521,7 +622,7 @@ def tab_bienvenida():
 Escribe el sector que quieres analizar y la ciudad objetivo.""")
     with col2:
         st.markdown("""**2️⃣ Lanzamos el análisis**
-Cruzamos Google Maps, Trends y reseñas con IA en segundos.""")
+Cruzamos OpenStreetMap, Trends e IA en segundos.""")
     with col3:
         st.markdown("""**3️⃣ Obtén tu estrategia**
 Detectamos brechas, keywords y oportunidades concretas.""")
@@ -567,10 +668,9 @@ def tab_historial():
 def tab_analizar(mods):
     plan = st.session_state.get("user_plan", "free")
     uid  = st.session_state.get("user_id", 0)
+    demo = (plan == "demo")
 
-    g_key = os.getenv("GOOGLE_API_KEY", "")
     o_key = os.getenv("OPENAI_API_KEY", "")
-    demo  = (plan == "demo") or not g_key
 
     if plan == "free":
         used = get_daily_usage(uid)
@@ -585,12 +685,15 @@ def tab_analizar(mods):
     with st.form("analisis_form"):
         col1, col2 = st.columns([2, 1])
         with col1:
-            nicho = st.text_input("🎯 Nicho / Sector", placeholder="Ej: Hamburgueserías, Cafeterías, Gimnasios…")
+            nicho = st.text_input("🎯 Nicho / Sector",
+                                  placeholder="Ej: Restaurantes, Cafeterías, Gimnasios…")
         with col2:
-            ubicacion = st.text_input("📍 Ciudad", placeholder="Madrid, Barcelona, CDMX…")
+            ubicacion = st.text_input("📍 Ciudad",
+                                      placeholder="Valladolid, Madrid, Barcelona…")
         if demo:
-            st.info("🎯 **Modo Demo** — mostrando datos de ejemplo. Configura tus API keys en Streamlit Secrets para datos reales.")
-        analizar = st.form_submit_button("🚀 Analizar Mercado", type="primary", use_container_width=True)
+            st.info("🎯 **Modo Demo** — mostrando datos de ejemplo. Regístrate gratis para análisis reales.")
+        analizar = st.form_submit_button("🚀 Analizar Mercado", type="primary",
+                                         use_container_width=True)
 
     if not analizar:
         return
@@ -601,14 +704,16 @@ def tab_analizar(mods):
     ai_text = ""
     keywords = []
     trend_series = None
+    kws = []
 
-    with st.spinner("Buscando competidores…"):
-        negocios = DEMO_BUSINESSES if demo else buscar_negocios(g_key, nicho, ubicacion)
+    # ── Buscar competidores ──────────────────────────
+    with st.spinner("Buscando competidores en OpenStreetMap…"):
+        negocios = DEMO_BUSINESSES if demo else buscar_negocios(nicho, ubicacion)
         if not negocios:
             st.error("No se encontraron resultados. Prueba con otro nicho o ciudad.")
             return
 
-    # Incrementar uso solo cuando hay resultados reales
+    # Incrementar uso SOLO cuando hay resultados reales
     if plan == "free" and uid > 0:
         increment_usage(uid)
 
@@ -616,17 +721,28 @@ def tab_analizar(mods):
     if mods["competidores"]:
         st.markdown("### 🏢 Competidores encontrados")
         df = pd.DataFrame([{
-            "Nombre": n["name"],
-            "Rating": n.get("rating", "N/A"),
-            "Reseñas": n.get("user_ratings_total", 0),
-            "Dirección": n.get("formatted_address", ""),
+            "Nombre":   n["name"],
+            "Rating":   n.get("rating") or "—",
+            "Reseñas":  n.get("user_ratings_total", 0) or 0,
+            "Dirección": n.get("formatted_address", n.get("vicinity", "")),
         } for n in negocios[:10]])
         st.dataframe(df, use_container_width=True)
-        fig = px.bar(df.sort_values("Rating"), x="Nombre", y="Rating",
-                     color="Rating", color_continuous_scale="Blues",
-                     title="Rating por competidor")
-        fig.update_layout(xaxis_tickangle=-30)
-        st.plotly_chart(fig, use_container_width=True)
+
+        # Solo mostrar gráfico de ratings si hay datos reales
+        ratings_disponibles = [n for n in negocios if n.get("rating")]
+        if ratings_disponibles:
+            df_r = pd.DataFrame([{
+                "Nombre": n["name"],
+                "Rating": n["rating"],
+            } for n in ratings_disponibles[:10]])
+            fig = px.bar(df_r.sort_values("Rating"), x="Nombre", y="Rating",
+                         color="Rating", color_continuous_scale="Blues",
+                         title="Rating por competidor")
+            fig.update_layout(xaxis_tickangle=-30)
+            st.plotly_chart(fig, use_container_width=True)
+        else:
+            st.info(f"📍 Se encontraron **{len(negocios)} establecimientos** en OpenStreetMap. "
+                    "Los datos de rating no están disponibles en esta fuente.")
 
     # ── Google Trends ──────────────────────────
     if mods["google_trends"]:
@@ -663,23 +779,8 @@ def tab_analizar(mods):
         if plan not in ["pro", "demo"] and not o_key:
             st.warning("🔒 El análisis IA es exclusivo del plan PRO.")
         else:
-            st.markdown("### 🤖 Análisis IA de Reseñas")
-            with st.spinner("Analizando reseñas con IA…"):
-                if demo:
-                    reviews = DEMO_REVIEWS
-                else:
-                    reviews = []
-                    for n in negocios[:3]:
-                        reviews += obtener_resenas(g_key, n.get("place_id", ""))
-
-                if demo:
-                    pass  # use demo text below
-                elif reviews and o_key:
-                    try:
-                        client = OpenAI(api_key=o_key)
-                        ai_text = analizar_con_ia(client, nicho, reviews)
-                    except Exception as e:
-                        ai_text = f"Error IA: {e}"
+            st.markdown("### 🤖 Análisis IA de Mercado")
+            with st.spinner("Analizando mercado con IA…"):
                 if demo:
                     ai_text = """PUNTOS DE DOLOR:
 • Tiempos de espera excesivos (>20 min) sin comunicación proactiva al cliente
@@ -695,8 +796,11 @@ RECOMENDACIÓN ESTRATÉGICA:
 Posiciónate como la opción "fast-casual premium" con tiempos garantizados y opciones inclusivas. \
 Un programa de fidelización digital desde el día 1 puede capturar la demanda insatisfecha que actualmente \
 va a cadenas internacionales."""
+                elif o_key:
+                    client = OpenAI(api_key=o_key)
+                    ai_text = analizar_con_ia(client, nicho, ubicacion, negocios)
                 else:
-                    ai_text = "Configura tu OpenAI API key para obtener el análisis IA."
+                    ai_text = "Configura tu OpenAI API key en Streamlit Secrets para obtener el análisis IA."
 
             st.markdown(ai_text)
 
@@ -725,9 +829,9 @@ va a cadenas internacionales."""
         st.markdown("#### 🏆 Podio de Competidores")
         sorted_s = sorted(scores, key=lambda x: x["Amenaza"], reverse=True)
         p1, p2, p3 = st.columns(3)
-        if len(sorted_s) > 0: p1.metric("🥇 Líder",    sorted_s[0]["name"], f"Amenaza: {sorted_s[0]['Amenaza']}")
-        if len(sorted_s) > 1: p2.metric("🥈 2º puesto", sorted_s[1]["name"], f"Amenaza: {sorted_s[1]['Amenaza']}")
-        if len(sorted_s) > 2: p3.metric("🥉 3º puesto", sorted_s[2]["name"], f"Amenaza: {sorted_s[2]['Amenaza']}")
+        if len(sorted_s) > 0: p1.metric("🥇 Líder",    sorted_s[0]["name"], f"Score: {sorted_s[0]['Amenaza']}")
+        if len(sorted_s) > 1: p2.metric("🥈 2º puesto", sorted_s[1]["name"], f"Score: {sorted_s[1]['Amenaza']}")
+        if len(sorted_s) > 2: p3.metric("🥉 3º puesto", sorted_s[2]["name"], f"Score: {sorted_s[2]['Amenaza']}")
 
     # ── Brechas de Mercado ──────────────────────────
     if mods["brechas"] and len(negocios) >= 2:
@@ -757,7 +861,7 @@ va a cadenas internacionales."""
         save_analysis(uid, nicho, ubicacion, {
             "negocios": negocios[:5],
             "ai_text": ai_text,
-            "keywords": kws if mods["keywords"] else [],
+            "keywords": kws,
         })
 
     # ── Exportar HTML ──────────────────────────
@@ -768,7 +872,7 @@ va a cadenas internacionales."""
                                        DEMO_TRENDS if demo else (trend_series or {}))
         html = generar_reporte_html(nicho, ubicacion, negocios, ai_text,
                                     DEMO_TRENDS if demo else (trend_series or {}),
-                                    brechas_exp, kws if mods["keywords"] else [])
+                                    brechas_exp, kws)
         st.download_button("⬇️ Descargar Reporte HTML", html,
                            file_name=f"análisis_{nicho}_{ubicacion}.html",
                            mime="text/html")
@@ -779,7 +883,6 @@ va a cadenas internacionales."""
 # ─────────────────────────────────────────────
 
 def main():
-    # Inicializar session state
     if "logged_in" not in st.session_state:
         st.session_state.logged_in = False
     if "auth_mode" not in st.session_state:
@@ -787,7 +890,6 @@ def main():
     if "show_upgrade" not in st.session_state:
         st.session_state.show_upgrade = False
 
-    # Pantalla de auth si no está logueado
     if not st.session_state.logged_in:
         st.markdown('<div style="text-align:center;padding:2rem">'
                     '<h1>📊 IA Market Analyzer</h1>'
@@ -799,13 +901,11 @@ def main():
             pagina_registro()
         return
 
-    # Pantalla de upgrade
     if st.session_state.show_upgrade and st.session_state.user_plan != "demo":
         mods = render_sidebar()
         pantalla_upgrade()
         return
 
-    # App principal con tabs
     mods = render_sidebar()
     tab_b, tab_a, tab_h = st.tabs(["🏠 Bienvenida", "🔍 Analizar Mercado", "📋 Mi Historial"])
     with tab_b:
