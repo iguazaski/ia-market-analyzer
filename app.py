@@ -242,25 +242,35 @@ def _get_osm_tags(nicho: str) -> list[str]:
     return [f'node[name~"{nicho}",i]', f'way[name~"{nicho}",i]']
 
 
+OVERPASS_MIRRORS = [
+    "https://overpass-api.de/api/interpreter",
+    "https://overpass.kumi.systems/api/interpreter",
+    "https://overpass.openstreetmap.ru/api/interpreter",
+]
+
 def buscar_negocios(nicho: str, ubicacion: str) -> list:
     """Busca negocios usando OpenStreetMap Overpass API — gratuito, sin billing."""
     osm_tags = _get_osm_tags(nicho)
     union_parts = "\n  ".join(f"{tag}(area.searchArea);" for tag in osm_tags)
 
     def _query(city_name: str) -> list:
-        q = f"""[out:json][timeout:30];
+        q = f"""[out:json][timeout:25];
 area[name="{city_name}"]->.searchArea;
 (
   {union_parts}
 );
 out body;"""
-        resp = requests.post(
-            "https://overpass-api.de/api/interpreter",
-            data={"data": q},
-            timeout=35
-        )
-        resp.raise_for_status()
-        return resp.json().get("elements", [])
+        last_err = None
+        for mirror in OVERPASS_MIRRORS:
+            try:
+                # GET con params es más compatible entre mirrors
+                resp = requests.get(mirror, params={"data": q}, timeout=30)
+                resp.raise_for_status()
+                return resp.json().get("elements", [])
+            except Exception as e:
+                last_err = e
+                continue
+        raise last_err
 
     try:
         elements = _query(ubicacion)
