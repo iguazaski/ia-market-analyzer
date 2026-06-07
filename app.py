@@ -907,4 +907,9 @@ def main():
         tab_bienvenida()
     with tab_a:
         tab_analizar(mods)
-   
+    with tab_h:
+        tab_historial()
+
+
+if __name__ == "__main__":
+    main()
