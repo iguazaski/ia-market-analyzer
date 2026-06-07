@@ -195,120 +195,101 @@ DEMO_KEYWORDS = [
 # ─────────────────────────────────────────────
 
 
-# Mapa nicho → osm_tag para Photon API (key:value)
-PHOTON_TAG_MAP = {
-    ("restaurante", "comida", "cocina", "gastro", "comer"): "amenity:restaurant",
-    ("hamburgues", "burger", "smash", "fast food"): "amenity:fast_food",
-    ("café", "cafetería", "cafeteria", "coffee", "desayuno"): "amenity:cafe",
-    ("pizza", "pizzería", "pizzeria"): "amenity:restaurant",
-    ("gimnasio", "gym", "fitness", "crossfit", "pilates", "yoga"): "leisure:fitness_centre",
-    ("hotel", "hostal", "alojamiento", "pensión", "pension"): "tourism:hotel",
-    ("farmacia",): "amenity:pharmacy",
-    ("bar", "cervecería", "pub", "tapas", "taberna", "bodega"): "amenity:bar",
-    ("peluquería", "peluqueria", "barbería", "barberia", "belleza"): "shop:hairdresser",
-    ("supermercado", "alimentación", "mercado"): "shop:supermarket",
-    ("dentista", "dental"): "amenity:dentist",
-    ("veterinario", "veterinaria"): "amenity:veterinary",
-    ("panadería", "panaderia", "pastelería", "pasteleria"): "shop:bakery",
-    ("ropa", "moda"): "shop:clothes",
-    ("librería", "libreria", "libros"): "shop:books",
-    ("floristería", "floristeria", "flores"): "shop:florist",
-}
-
-def _get_photon_tag(nicho: str) -> str:
-    nicho_lower = nicho.lower()
-    for keywords, tag in PHOTON_TAG_MAP.items():
-        if any(kw in nicho_lower for kw in keywords):
-            return tag
-    return ""   # sin filtro → búsqueda por nombre libre
-
-
-def _get_city_center(city: str) -> tuple | None:
-    """Latitud/longitud del centro de la ciudad vía Nominatim."""
-    try:
-        resp = requests.get(
-            "https://nominatim.openstreetmap.org/search",
-            params={"q": city, "format": "json", "limit": 1},
-            headers={"User-Agent": "IA-Market-Analyzer/1.0"},
-            timeout=10
-        )
-        resp.raise_for_status()
-        results = resp.json()
-        if not results:
-            return None
-        return float(results[0]["lat"]), float(results[0]["lon"])
-    except Exception:
-        return None
+def _nominatim_queries(nicho: str, ubicacion: str) -> list[str]:
+    """Genera 1-2 términos de búsqueda para Nominatim según el nicho."""
+    n = nicho.lower()
+    if any(w in n for w in ["restaurante", "comida", "comer", "gastro", "cocina"]):
+        return [f"restaurante {ubicacion}", f"restaurant {ubicacion}"]
+    elif any(w in n for w in ["café", "cafetería", "cafeteria", "coffee"]):
+        return [f"café {ubicacion}", f"cafetería {ubicacion}"]
+    elif any(w in n for w in ["bar", "tapas", "pub", "cervecería", "taberna"]):
+        return [f"bar {ubicacion}", f"pub {ubicacion}"]
+    elif any(w in n for w in ["hamburgues", "burger", "smash"]):
+        return [f"hamburguesería {ubicacion}", f"fast food {ubicacion}"]
+    elif any(w in n for w in ["pizza", "pizz"]):
+        return [f"pizzería {ubicacion}"]
+    elif any(w in n for w in ["gimnasio", "gym", "fitness", "crossfit"]):
+        return [f"gimnasio {ubicacion}", f"gym {ubicacion}"]
+    elif any(w in n for w in ["hotel", "hostal", "alojamiento"]):
+        return [f"hotel {ubicacion}"]
+    elif any(w in n for w in ["farmacia"]):
+        return [f"farmacia {ubicacion}"]
+    elif any(w in n for w in ["peluquería", "peluqueria", "barbería", "barberia"]):
+        return [f"peluquería {ubicacion}", f"barbería {ubicacion}"]
+    elif any(w in n for w in ["panadería", "panaderia", "pastelería"]):
+        return [f"panadería {ubicacion}", f"pastelería {ubicacion}"]
+    elif any(w in n for w in ["supermercado", "alimentación"]):
+        return [f"supermercado {ubicacion}"]
+    else:
+        return [f"{nicho} {ubicacion}"]
 
 
 def buscar_negocios(nicho: str, ubicacion: str) -> list:
-    """Busca negocios usando Photon (komoot) — basado en OSM, gratuito, sin API key."""
-    # 1. Centro de la ciudad
-    center = _get_city_center(ubicacion)
-    if center is None:
-        st.error(f"No se encontró '{ubicacion}'. Prueba con el nombre completo de la ciudad.")
-        return []
-    lat, lon = center
-
-    # 2. Buscar con Photon
-    photon_tag = _get_photon_tag(nicho)
-    params: dict = {"q": nicho, "lat": lat, "lon": lon, "limit": 50, "lang": "es"}
-    if photon_tag:
-        params["osm_tag"] = photon_tag
-
-    try:
-        resp = requests.get(
-            "https://photon.komoot.io/api/",
-            params=params,
-            timeout=15
-        )
-        resp.raise_for_status()
-        features = resp.json().get("features", [])
-    except Exception as e:
-        st.error(f"Error buscando negocios: {e}")
-        return []
-
-    if not features:
-        st.warning(f"No se encontraron negocios de '{nicho}' en '{ubicacion}'. "
-                   "Prueba con un nicho más genérico (ej: 'restaurante', 'bar').")
-        return []
-
-    # Parsear formato GeoJSON de Photon
+    """Busca negocios via Nominatim (OpenStreetMap geocoder) — funciona desde cualquier IP."""
+    queries = _nominatim_queries(nicho, ubicacion)
     negocios = []
-    seen = set()
-    for feat in features:
-        props = feat.get("properties", {})
-        name = props.get("name")
-        if not name or name in seen:
+    seen: set[str] = set()
+
+    for q in queries:
+        try:
+            resp = requests.get(
+                "https://nominatim.openstreetmap.org/search",
+                params={
+                    "q": q,
+                    "format": "json",
+                    "limit": 25,
+                    "addressdetails": 1,
+                    "extratags": 1,
+                },
+                headers={"User-Agent": "IA-Market-Analyzer/1.0 (icdvillar8@gmail.com)"},
+                timeout=12
+            )
+            resp.raise_for_status()
+            results = resp.json()
+
+            for r in results:
+                # El nombre del POI es la primera parte del display_name
+                raw_name = r.get("display_name", "")
+                name = raw_name.split(",")[0].strip()
+                if not name or name in seen or len(name) < 3:
+                    continue
+                # Descartar si el nombre es simplemente la ciudad
+                if name.lower() in [ubicacion.lower(), "spain", "españa"]:
+                    continue
+                seen.add(name)
+
+                addr_d = r.get("address", {})
+                street = addr_d.get("road", "")
+                housenumber = addr_d.get("house_number", "")
+                postcode = addr_d.get("postcode", "")
+                city_r = addr_d.get("city", addr_d.get("town", addr_d.get("village", ubicacion)))
+
+                if street:
+                    addr = f"{street} {housenumber}".strip()
+                    addr += f", {postcode + ' ' if postcode else ''}{city_r}"
+                else:
+                    addr = city_r
+
+                negocios.append({
+                    "name": name,
+                    "vicinity": addr,
+                    "formatted_address": addr,
+                    "rating": None,
+                    "user_ratings_total": 0,
+                    "types": [nicho.lower()],
+                    "place_id": f"nom_{r.get('osm_id', '')}",
+                    "website": (r.get("extratags") or {}).get("website", ""),
+                })
+
+        except Exception:
             continue
-        seen.add(name)
 
-        street = props.get("street", "")
-        housenumber = props.get("housenumber", "")
-        postcode = props.get("postcode", "")
-        city_prop = props.get("city", ubicacion)
+        if len(negocios) >= 15:
+            break
 
-        if street:
-            addr = f"{street} {housenumber}".strip()
-            if postcode:
-                addr += f", {postcode} {city_prop}"
-            else:
-                addr += f", {city_prop}"
-        else:
-            addr = city_prop
-
-        osm_id = props.get("osm_id", "")
-        negocios.append({
-            "name": name,
-            "vicinity": addr,
-            "formatted_address": addr,
-            "rating": None,
-            "user_ratings_total": 0,
-            "types": [nicho.lower()],
-            "place_id": f"photon_{osm_id}",
-            "website": props.get("website", ""),
-        })
-
+    if not negocios:
+        st.warning(f"No se encontraron negocios de '{nicho}' en '{ubicacion}'. "
+                   "Prueba con un término más genérico (ej: 'restaurante', 'bar').")
     return negocios[:20]
 
 
