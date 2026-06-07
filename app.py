@@ -665,10 +665,15 @@ def tab_analizar(mods):
                     for n in negocios[:3]:
                         reviews += obtener_resenas(g_key, n.get("place_id", ""))
 
-                if reviews and o_key:
-                    client = OpenAI(api_key=o_key)
-                    ai_text = analizar_con_ia(client, nicho, reviews)
-                elif demo:
+                if demo:
+                    pass  # use demo text below
+                elif reviews and o_key:
+                    try:
+                        client = OpenAI(api_key=o_key)
+                        ai_text = analizar_con_ia(client, nicho, reviews)
+                    except Exception as e:
+                        ai_text = f"Error IA: {e}"
+                if demo:
                     ai_text = """PUNTOS DE DOLOR:
 • Tiempos de espera excesivos (>20 min) sin comunicación proactiva al cliente
 • Falta de opciones para dietas especiales (vegetariano, vegano, sin gluten)
