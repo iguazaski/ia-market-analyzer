@@ -204,102 +204,173 @@ DEMO_KEYWORDS = [
 # ─────────────────────────────────────────────
 
 
-def _nominatim_queries(nicho: str, ubicacion: str) -> list[str]:
-    """Genera 1-2 términos de búsqueda para Nominatim según el nicho."""
+def _osm_tags_para_nicho(nicho: str) -> list[tuple[str, str]]:
+    """Mapea el nicho a tags OSM para búsqueda Overpass precisa."""
     n = nicho.lower()
-    if any(w in n for w in ["restaurante", "comida", "comer", "gastro", "cocina"]):
-        return [f"restaurante {ubicacion}", f"restaurant {ubicacion}"]
-    elif any(w in n for w in ["café", "cafetería", "cafeteria", "coffee"]):
-        return [f"café {ubicacion}", f"cafetería {ubicacion}"]
+    if any(w in n for w in ["gimnasio", "gym", "fitness", "crossfit", "deporte"]):
+        return [("amenity", "gym"), ("leisure", "fitness_centre"), ("leisure", "sports_centre")]
+    elif any(w in n for w in ["restaurante", "restaurant", "comida", "gastro", "cocina"]):
+        return [("amenity", "restaurant")]
+    elif any(w in n for w in ["café", "cafeteria", "cafetería", "coffee", "cafeteria"]):
+        return [("amenity", "cafe")]
     elif any(w in n for w in ["bar", "tapas", "pub", "cervecería", "taberna"]):
-        return [f"bar {ubicacion}", f"pub {ubicacion}"]
-    elif any(w in n for w in ["hamburgues", "burger", "smash"]):
-        return [f"hamburguesería {ubicacion}", f"fast food {ubicacion}"]
-    elif any(w in n for w in ["pizza", "pizz"]):
-        return [f"pizzería {ubicacion}"]
-    elif any(w in n for w in ["gimnasio", "gym", "fitness", "crossfit"]):
-        return [f"gimnasio {ubicacion}", f"gym {ubicacion}"]
-    elif any(w in n for w in ["hotel", "hostal", "alojamiento"]):
-        return [f"hotel {ubicacion}"]
+        return [("amenity", "bar"), ("amenity", "pub")]
     elif any(w in n for w in ["farmacia"]):
-        return [f"farmacia {ubicacion}"]
+        return [("amenity", "pharmacy")]
+    elif any(w in n for w in ["hotel", "hostal", "alojamiento"]):
+        return [("tourism", "hotel"), ("tourism", "hostel"), ("tourism", "guest_house")]
     elif any(w in n for w in ["peluquería", "peluqueria", "barbería", "barberia"]):
-        return [f"peluquería {ubicacion}", f"barbería {ubicacion}"]
+        return [("shop", "hairdresser"), ("shop", "barber")]
     elif any(w in n for w in ["panadería", "panaderia", "pastelería"]):
-        return [f"panadería {ubicacion}", f"pastelería {ubicacion}"]
-    elif any(w in n for w in ["supermercado", "alimentación"]):
-        return [f"supermercado {ubicacion}"]
-    else:
-        return [f"{nicho} {ubicacion}"]
+        return [("shop", "bakery")]
+    elif any(w in n for w in ["supermercado"]):
+        return [("shop", "supermarket")]
+    elif any(w in n for w in ["hamburgues", "burger"]):
+        return [("amenity", "fast_food"), ("amenity", "restaurant")]
+    elif any(w in n for w in ["pizza"]):
+        return [("amenity", "restaurant"), ("amenity", "fast_food")]
+    return []  # Sin mapeo → fallback a Nominatim
 
 
-def buscar_negocios(nicho: str, ubicacion: str) -> list:
-    """Busca negocios via Nominatim (OpenStreetMap geocoder) — funciona desde cualquier IP."""
-    queries = _nominatim_queries(nicho, ubicacion)
+def _buscar_via_overpass(nicho: str, ubicacion: str) -> list:
+    """Búsqueda por categoría via Overpass API — mucho más completa que Nominatim."""
+    tags = _osm_tags_para_nicho(nicho)
+    if not tags:
+        return []
+    try:
+        # Geocodificar ciudad → bounding box
+        geo = requests.get(
+            "https://nominatim.openstreetmap.org/search",
+            params={"q": ubicacion, "format": "json", "limit": 1, "featuretype": "city"},
+            headers={"User-Agent": "IA-Market-Analyzer/1.0 (icdvillar8@gmail.com)"},
+            timeout=10
+        ).json()
+        if not geo:
+            geo = requests.get(
+                "https://nominatim.openstreetmap.org/search",
+                params={"q": ubicacion, "format": "json", "limit": 1},
+                headers={"User-Agent": "IA-Market-Analyzer/1.0 (icdvillar8@gmail.com)"},
+                timeout=10
+            ).json()
+        if not geo:
+            return []
+
+        bb = geo[0].get("boundingbox")  # [south, north, west, east]
+        if not bb:
+            return []
+        s, n_lat, w, e = bb[0], bb[1], bb[2], bb[3]
+
+        # Construir query Overpass para nodos y ways
+        filtros = []
+        for (k, v) in tags:
+            filtros.append(f'node["{k}"="{v}"]({s},{w},{n_lat},{e});')
+            filtros.append(f'way["{k}"="{v}"]({s},{w},{n_lat},{e});')
+        query = f'[out:json][timeout:25];({" ".join(filtros)});out body;'
+
+        resp = requests.post(
+            "https://overpass-api.de/api/interpreter",
+            data={"data": query},
+            timeout=30
+        )
+        data = resp.json()
+        elements = data.get("elements", [])
+
+        negocios = []
+        seen: set[str] = set()
+        for el in elements:
+            t = el.get("tags", {})
+            name = t.get("name") or t.get("name:es") or ""
+            if not name or name in seen or len(name) < 3:
+                continue
+            seen.add(name)
+
+            # Construir dirección desde tags OSM
+            parts = []
+            st_name = t.get("addr:street", "")
+            if st_name:
+                hn = t.get("addr:housenumber", "")
+                parts.append(f"{st_name} {hn}".strip() if hn else st_name)
+            if t.get("addr:postcode"):
+                parts.append(t["addr:postcode"])
+            parts.append(t.get("addr:city", ubicacion))
+            addr = ", ".join(parts)
+
+            negocios.append({
+                "name": name,
+                "vicinity": addr,
+                "formatted_address": addr,
+                "rating": None,
+                "user_ratings_total": 0,
+                "types": [nicho.lower()],
+                "place_id": f'osm_{el.get("id", "")}',
+                "website": t.get("website", t.get("contact:website", "")),
+                "phone": t.get("phone", t.get("contact:phone", "")),
+                "opening_hours": t.get("opening_hours", ""),
+            })
+            if len(negocios) >= 25:
+                break
+
+        return negocios
+    except Exception:
+        return []
+
+
+def _buscar_via_nominatim(nicho: str, ubicacion: str) -> list:
+    """Fallback: búsqueda por texto libre en Nominatim."""
+    queries_map = {
+        **{w: [f"gimnasio {ubicacion}", f"gym {ubicacion}"] for w in ["gimnasio", "gym", "fitness"]},
+        **{w: [f"restaurante {ubicacion}"] for w in ["restaurante", "restaurant"]},
+        **{w: [f"cafetería {ubicacion}", f"café {ubicacion}"] for w in ["café", "cafeteria"]},
+        **{w: [f"bar {ubicacion}", f"pub {ubicacion}"] for w in ["bar", "tapas"]},
+    }
+    n = nicho.lower()
+    queries = next((v for k, v in queries_map.items() if k in n), [f"{nicho} {ubicacion}"])
+
     negocios = []
     seen: set[str] = set()
-
     for q in queries:
         try:
-            resp = requests.get(
+            results = requests.get(
                 "https://nominatim.openstreetmap.org/search",
-                params={
-                    "q": q,
-                    "format": "json",
-                    "limit": 25,
-                    "addressdetails": 1,
-                    "extratags": 1,
-                },
+                params={"q": q, "format": "json", "limit": 25, "addressdetails": 1, "extratags": 1},
                 headers={"User-Agent": "IA-Market-Analyzer/1.0 (icdvillar8@gmail.com)"},
                 timeout=12
-            )
-            resp.raise_for_status()
-            results = resp.json()
-
+            ).json()
             for r in results:
-                # El nombre del POI es la primera parte del display_name
-                raw_name = r.get("display_name", "")
-                name = raw_name.split(",")[0].strip()
+                name = r.get("display_name", "").split(",")[0].strip()
                 if not name or name in seen or len(name) < 3:
                     continue
-                # Descartar si el nombre es simplemente la ciudad
                 if name.lower() in [ubicacion.lower(), "spain", "españa"]:
                     continue
                 seen.add(name)
-
                 addr_d = r.get("address", {})
                 street = addr_d.get("road", "")
-                housenumber = addr_d.get("house_number", "")
-                postcode = addr_d.get("postcode", "")
+                hn = addr_d.get("house_number", "")
+                pc = addr_d.get("postcode", "")
                 city_r = addr_d.get("city", addr_d.get("town", addr_d.get("village", ubicacion)))
-
-                if street:
-                    addr = f"{street} {housenumber}".strip()
-                    addr += f", {postcode + ' ' if postcode else ''}{city_r}"
-                else:
-                    addr = city_r
-
+                addr = (f"{street} {hn}".strip() + f", {pc + ' ' if pc else ''}{city_r}") if street else city_r
                 negocios.append({
-                    "name": name,
-                    "vicinity": addr,
-                    "formatted_address": addr,
-                    "rating": None,
-                    "user_ratings_total": 0,
-                    "types": [nicho.lower()],
-                    "place_id": f"nom_{r.get('osm_id', '')}",
+                    "name": name, "vicinity": addr, "formatted_address": addr,
+                    "rating": None, "user_ratings_total": 0, "types": [nicho.lower()],
+                    "place_id": f'nom_{r.get("osm_id", "")}',
                     "website": (r.get("extratags") or {}).get("website", ""),
                 })
-
         except Exception:
             continue
-
         if len(negocios) >= 15:
             break
-
-    if not negocios:
-        st.warning(f"No se encontraron negocios de '{nicho}' en '{ubicacion}'. "
-                   "Prueba con un término más genérico (ej: 'restaurante', 'bar').")
     return negocios[:20]
+
+
+def buscar_negocios(nicho: str, ubicacion: str) -> list:
+    """Busca negocios: primero Overpass API (por categoría), fallback a Nominatim."""
+    result = _buscar_via_overpass(nicho, ubicacion)
+    if not result:
+        result = _buscar_via_nominatim(nicho, ubicacion)
+    if not result:
+        st.warning(f"No se encontraron resultados para '{nicho}' en '{ubicacion}'. "
+                   "Prueba con un término más genérico (ej: 'gimnasio', 'restaurante').")
+    return result[:20]
 
 
 def obtener_tendencias(nicho, ubicacion):
@@ -326,31 +397,173 @@ def obtener_tendencias(nicho, ubicacion):
 
 
 def analizar_con_ia(client, nicho, ubicacion, negocios_list):
-    """Analiza el mercado usando la lista de negocios encontrados."""
+    """Analiza el mercado con IA. Lanza excepción 'QUOTA_EXCEEDED' si sin créditos."""
     nombres = [n["name"] for n in negocios_list[:15]]
     nombres_str = "\n".join(f"- {n}" for n in nombres) if nombres else "(sin datos)"
+    n_total = len(negocios_list)
+    saturacion = "alta" if n_total >= 15 else ("moderada" if n_total >= 7 else "baja")
 
-    prompt = f"""Analiza el mercado de '{nicho}' en {ubicacion}.
+    prompt = f"""Eres consultor de estrategia empresarial experto en mercados locales españoles.
 
-Competidores encontrados ({len(nombres)}):
+CONTEXTO:
+- Nicho: {nicho}
+- Ciudad: {ubicacion}
+- Competidores encontrados: {n_total} (saturación {saturacion})
+- Lista de competidores:
 {nombres_str}
 
-Proporciona en español un análisis estratégico con:
-1. PUNTOS DE DOLOR principales del sector (3 bullets)
-2. OPORTUNIDADES DE MERCADO para un nuevo entrante (3 bullets)
-3. RECOMENDACIÓN ESTRATÉGICA para diferenciarse (2-3 frases)
+Mi cliente quiere abrir un negocio de "{nicho}" en {ubicacion}. Necesita saber si tiene oportunidad REAL.
 
-Sé específico para {ubicacion} y el sector {nicho}. Sé directo y accionable."""
+Responde EXACTAMENTE con este formato:
+
+🔴 PUNTOS DE DOLOR DEL SECTOR (3 problemas que tienen HOY los clientes de estos negocios):
+• [problema 1 específico para {ubicacion}, concreto]
+• [problema 2]
+• [problema 3]
+
+🟢 OPORTUNIDADES DE MERCADO (3 gaps reales que puede aprovechar un nuevo entrante):
+• [oportunidad 1 accionable y específica]
+• [oportunidad 2]
+• [oportunidad 3]
+
+🎯 ESTRATEGIA RECOMENDADA (cómo diferenciarse y ganar cuota en {ubicacion}):
+[2-3 frases directas: qué hacer, cómo posicionarse, propuesta de valor ganadora]
+
+⚡ ACCIÓN PRIORITARIA esta semana:
+[1 sola acción concreta que puede empezar HOY]
+
+Sé directo y específico para {ubicacion}/{nicho}. Cero consejos genéricos."""
 
     try:
         resp = client.chat.completions.create(
             model="gpt-4o-mini",
             messages=[{"role": "user", "content": prompt}],
-            max_tokens=600
+            max_tokens=700,
+            temperature=0.7
         )
         return resp.choices[0].message.content
     except Exception as e:
-        return f"Error IA: {e}"
+        err = str(e)
+        if "429" in err or "quota" in err.lower() or "insufficient_quota" in err:
+            raise RuntimeError("QUOTA_EXCEEDED")
+        raise
+
+
+def analisis_estrategico_fallback(nicho: str, ubicacion: str, negocios: list, trend_data=None) -> str:
+    """Análisis estratégico por reglas cuando OpenAI no está disponible."""
+    n = len(negocios)
+    nl = nicho.lower()
+
+    if n >= 15:
+        sat_txt = f"🔴 **Alta saturación** — {n}+ establecimientos detectados. Mercado maduro y competitivo."
+        sat_nivel = "alto"
+    elif n >= 7:
+        sat_txt = f"🟡 **Saturación moderada** — {n} establecimientos. Hay espacio para entrantes diferenciados."
+        sat_nivel = "medio"
+    else:
+        sat_txt = f"🟢 **Baja competencia** — solo {n} establecimientos detectados. Oportunidad de primer mover."
+        sat_nivel = "bajo"
+
+    tend_txt = ""
+    if trend_data is not None:
+        try:
+            vals = list(trend_data.values()) if isinstance(trend_data, dict) else trend_data.tolist()
+            if len(vals) > 1:
+                delta = vals[-1] - vals[0]
+                if delta > 8:
+                    tend_txt = f"\n📈 **Tendencia creciente** (+{delta:.0f} pts en 12 meses) — el mercado tiene viento a favor."
+                elif delta < -8:
+                    tend_txt = f"\n📉 **Tendencia decreciente** ({delta:.0f} pts) — considera nicho específico para contrarrestar."
+                else:
+                    tend_txt = "\n📊 **Demanda estable** — mercado consolidado sin picos estacionales fuertes."
+        except Exception:
+            pass
+
+    # Recomendaciones por sector
+    if any(w in nl for w in ["gimnasio", "gym", "fitness", "crossfit"]):
+        dolor = [
+            "Contratos largos y cuotas inflexibles que generan abandono masivo (60-70% de bajas antes de 3 meses).",
+            "Instalaciones masificadas en horas punta sin gestión de aforos ni reservas.",
+            "Falta de seguimiento personalizado — el cliente entra, paga y nadie le guía.",
+        ]
+        oportunidades = [
+            "**Sin permanencia**: cuota mensual flexible sin contrato. Es el argumento #1 de conversión en este sector.",
+            "**Entrenamiento guiado grupal** a precio accesible — el cliente quiere resultados, no solo máquinas.",
+            "**Nutrición integrada**: acuerdo con dietista local para ofrecer packs combinados. Sube el ticket 40-60%.",
+        ]
+        if sat_nivel == "alto":
+            estrategia = "Con alta saturación, **especialízate**: CrossFit, boxeo, pilates reformer o entrenamiento 40+. Un gimnasio generalista más no tiene futuro. Elige un nicho, sé el mejor en ese nicho."
+        elif sat_nivel == "medio":
+            estrategia = "**Propuesta de valor clara**: precio económico + sin contrato + 1 sesión de bienvenida gratuita. Captura los clientes descontentos de la competencia."
+        else:
+            estrategia = "**Ventaja de primer mover**: lanza rápido, ofrece tarifa de fundador (-30%) para los primeros 50 socios y genera testimonios desde el día 1."
+        accion = "Visita los 3 gimnasios más cercanos como cliente, observa sus puntos débiles y define en qué los vas a superar."
+
+    elif any(w in nl for w in ["restaurante", "restaurant", "comida"]):
+        dolor = [
+            "Tiempos de espera excesivos sin comunicación proactiva al cliente.",
+            "Menús poco actualizados que no contemplan dietas especiales (vegano, sin gluten, etc.).",
+            "Experiencia digital pobre: sin reservas online, sin carta digital, poca presencia en Google Maps.",
+        ]
+        oportunidades = [
+            "**Especialización gastronómica**: un restaurante con cocina definida (fusión, producto local, etc.) rankea mejor y genera más PR.",
+            "**Delivery propio o plataformas**: captura el 30-40% de demanda que solo consume en casa.",
+            "**Menú del día optimizado**: en ciudades medias, el menú diario (<15€) es el generador de tráfico y fidelización más efectivo.",
+        ]
+        estrategia = "Define primero si juegas en volumen (ticket bajo, rotación alta, delivery) o en experiencia (reservas, producto premium). Las estrategias de marketing son radicalmente distintas."
+        accion = "Abre Google Maps y lee las reseñas negativas de tus 5 competidores más próximos. Ahí está tu propuesta de valor."
+
+    elif any(w in nl for w in ["café", "cafeteria", "cafetería", "coffee"]):
+        dolor = [
+            "Café de baja calidad a precio medio — los consumidores cada vez más distinguen entre café de especialidad y commodity.",
+            "Servicio lento en hora punta (7-9h) que genera pérdida de clientes habituales.",
+            "Espacio poco pensado para teletrabajo — sin enchufes, wifi lento o ambiente ruidoso.",
+        ]
+        oportunidades = [
+            "**Café de especialidad**: origen single, barista certificado, V60 y aeropress. Permite cobrar 2x y fideliza al cliente exigente.",
+            "**Espacio de trabajo**: wifi rápido + enchufes + silencio = diferenciador clave para freelancers y teletrabajadores.",
+            "**Brunch los fines de semana**: el ticket medio es 3x el desayuno normal y el canal de Instagram que genera solo.",
+        ]
+        estrategia = "Invierte en la barra y en el barista antes que en la decoración. El café que sale del grifo y llega en 30 segundos ya no convence. La experiencia empieza en la taza."
+        accion = "Visita las 3 cafeterías más valoradas en Google Maps de tu ciudad y analiza qué tienen en común en presentación y servicio."
+
+    else:
+        dolor = [
+            "Poca diferenciación entre los competidores — el cliente no sabe por qué elegir uno u otro.",
+            "Presencia digital deficiente: fichas de Google incompletas, sin fotos actualizadas ni respuesta a reseñas.",
+            "Falta de fidelización estructurada — cada venta es una venta nueva sin recurrencia planificada.",
+        ]
+        oportunidades = [
+            "**Google Business Profile optimizado**: con fotos, horarios, productos y respuesta activa a reseñas. Es el canal gratuito #1.",
+            "**Propuesta de valor única y comunicable** en una frase. Si necesitas 3 frases para explicar qué haces, tienes un problema de posicionamiento.",
+            "**Programa de referidos**: en mercados locales, el boca a boca sigue siendo el canal de mayor conversión. Sistematízalo.",
+        ]
+        estrategia = "Antes de abrir, entrevista a 10 clientes potenciales. Sus respuestas valen más que cualquier estudio de mercado. Define tu cliente ideal y construye todo alrededor de él."
+        accion = "Configura hoy tu ficha de Google Business Profile completamente — es gratis y es lo primero que verá tu cliente."
+
+    result = f"""{sat_txt}{tend_txt}
+
+---
+
+🔴 **PUNTOS DE DOLOR DEL SECTOR**:
+- {dolor[0]}
+- {dolor[1]}
+- {dolor[2]}
+
+🟢 **OPORTUNIDADES DE MERCADO**:
+- {oportunidades[0]}
+- {oportunidades[1]}
+- {oportunidades[2]}
+
+🎯 **ESTRATEGIA RECOMENDADA**:
+{estrategia}
+
+⚡ **ACCIÓN PRIORITARIA esta semana**:
+{accion}
+
+---
+*Análisis automático basado en {n} competidores en {ubicacion}. Activa OpenAI en Streamlit Secrets para análisis IA personalizado.*"""
+    return result
 
 
 def calcular_scores(negocios):
@@ -770,6 +983,7 @@ def tab_analizar(mods):
             st.info("No se obtuvieron datos de tendencias para este nicho.")
 
     # ── Análisis IA ──────────────────────────
+    ai_text = ""  # default por si el export se usa sin IA
     if mods["analisis_ia"]:
         if plan not in ["pro", "admin", "demo"] and not o_key:
             st.warning("🔒 El análisis IA es exclusivo del plan PRO.")
@@ -791,13 +1005,36 @@ RECOMENDACIÓN ESTRATÉGICA:
 Posiciónate como la opción "fast-casual premium" con tiempos garantizados y opciones inclusivas. \
 Un programa de fidelización digital desde el día 1 puede capturar la demanda insatisfecha que actualmente \
 va a cadenas internacionales."""
+                    st.markdown(ai_text)
                 elif o_key:
                     client = OpenAI(api_key=o_key)
-                    ai_text = analizar_con_ia(client, nicho, ubicacion, negocios)
+                    try:
+                        ai_text = analizar_con_ia(client, nicho, ubicacion, negocios)
+                        st.markdown(ai_text)
+                    except RuntimeError as e:
+                        if "QUOTA_EXCEEDED" in str(e):
+                            st.warning(
+                                "⚠️ **Créditos de OpenAI agotados** — tu cuenta no tiene saldo disponible.\n\n"
+                                "👉 Recarga tu cuenta en [platform.openai.com/billing](https://platform.openai.com/billing) "
+                                "para volver a usar el análisis IA personalizado."
+                            )
+                            st.markdown("#### 📊 Análisis estratégico automático (sin IA)")
+                            trend_arg = trend_series if 'trend_series' in dir() else None
+                            st.markdown(analisis_estrategico_fallback(nicho, ubicacion, negocios, trend_arg))
+                        else:
+                            st.error(f"Error IA: {e}")
+                            st.markdown("#### 📊 Análisis estratégico automático")
+                            st.markdown(analisis_estrategico_fallback(nicho, ubicacion, negocios))
+                    except Exception as e:
+                        st.error(f"Error IA: {e}")
+                        st.markdown("#### 📊 Análisis estratégico automático")
+                        st.markdown(analisis_estrategico_fallback(nicho, ubicacion, negocios))
                 else:
-                    ai_text = "Configura tu OpenAI API key en Streamlit Secrets para obtener el análisis IA."
-
-            st.markdown(ai_text)
+                    ai_text = "Configura tu OpenAI API key en Streamlit Secrets para obtener el análisis IA personalizado."
+                    st.info(ai_text)
+                    st.markdown("#### 📊 Análisis estratégico automático")
+                    trend_arg = trend_series if 'trend_series' in dir() else None
+                    st.markdown(analisis_estrategico_fallback(nicho, ubicacion, negocios, trend_arg))
 
     # ── Competitor Scoring Matrix ──────────────────────────
     if mods["scoring"] and len(negocios) >= 2:
@@ -882,34 +1119,17 @@ def main():
         st.session_state.logged_in = False
     if "auth_mode" not in st.session_state:
         st.session_state.auth_mode = "login"
-    if "show_upgrade" not in st.session_state:
-        st.session_state.show_upgrade = False
-
-    if not st.session_state.logged_in:
-        st.markdown('<div style="text-align:center;padding:2rem">'
-                    '<h1>📊 IA Market Analyzer</h1>'
-                    '<p style="color:#666">Inteligencia de mercado para emprendedores</p>'
-                    '</div>', unsafe_allow_html=True)
-        if st.session_state.auth_mode == "login":
-            pagina_login()
-        else:
-            pagina_registro()
-        return
-
-    if st.session_state.show_upgrade and st.session_state.user_plan != "demo":
-        mods = render_sidebar()
-        pantalla_upgrade()
-        return
 
     mods = render_sidebar()
-    tab_b, tab_a, tab_h = st.tabs(["🏠 Bienvenida", "🔍 Analizar Mercado", "📋 Mi Historial"])
-    with tab_b:
-        tab_bienvenida()
-    with tab_a:
-        tab_analizar(mods)
-    with tab_h:
-        tab_historial()
 
+    if not st.session_state.logged_in:
+        render_auth()
+    else:
+        tab_a, tab_h = st.tabs(["🔍 Analizar Mercado", "📋 Historial"])
+        with tab_a:
+            tab_analizar(mods)
+        with tab_h:
+            tab_historial()
 
 if __name__ == "__main__":
     main()
