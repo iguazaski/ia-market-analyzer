@@ -818,7 +818,7 @@ va a cadenas internacionales."""
     if mods["brechas"] and len(negocios) >= 2:
         st.markdown("### 🔍 Brechas de Mercado Detectadas")
         scores_b = calcular_scores(negocios)
-        brechas = detectar_brechas(scores_b, DEMO_TRENDS if demo else (trend_series or {}))
+        brechas = detectar_brechas(scores_b, DEMO_TRENDS if demo else (trend_series if trend_series is not None else {}))
         for b in brechas:
             st.markdown(f"- {b}")
 
@@ -850,9 +850,9 @@ va a cadenas internacionales."""
         st.markdown("---")
         st.markdown("### 📥 Exportar Reporte")
         brechas_exp = detectar_brechas(calcular_scores(negocios),
-                                       DEMO_TRENDS if demo else (trend_series or {}))
+                                       DEMO_TRENDS if demo else (trend_series if trend_series is not None else {}))
         html = generar_reporte_html(nicho, ubicacion, negocios, ai_text,
-                                    DEMO_TRENDS if demo else (trend_series or {}),
+                                    DEMO_TRENDS if demo else (trend_series if trend_series is not None else {}),
                                     brechas_exp, kws)
         st.download_button("⬇️ Descargar Reporte HTML", html,
                            file_name=f"análisis_{nicho}_{ubicacion}.html",
