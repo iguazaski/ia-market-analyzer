@@ -338,27 +338,26 @@ th{{background:#1a1a2e;color:white;padding:.6rem}}td{{padding:.5rem;border-botto
 def pagina_login():
     st.markdown('<div class="auth-box">', unsafe_allow_html=True)
     st.markdown("## 🔐 Iniciar sesión")
-    email = st.text_input("Email", placeholder="tu@email.com", key="li_email")
-    password = st.text_input("Contraseña", type="password", key="li_pw")
-    col1, col2 = st.columns(2)
-    with col1:
-        if st.button("Entrar", use_container_width=True, type="primary"):
-            if not email or not password:
-                st.error("Completa todos los campos.")
+    with st.form("login_form"):
+        email = st.text_input("Email", placeholder="tu@email.com", key="li_email")
+        password = st.text_input("Contraseña", type="password", key="li_pw")
+        submitted = st.form_submit_button("Entrar", use_container_width=True, type="primary")
+    if submitted:
+        if not email or not password:
+            st.error("Completa todos los campos.")
+        else:
+            row = login_user(email, password)
+            if row:
+                st.session_state.user_id = row[0]
+                st.session_state.user_name = row[1]
+                st.session_state.user_plan = row[2]
+                st.session_state.logged_in = True
+                st.rerun()
             else:
-                row = login_user(email, password)
-                if row:
-                    st.session_state.user_id = row[0]
-                    st.session_state.user_name = row[1]
-                    st.session_state.user_plan = row[2]
-                    st.session_state.logged_in = True
-                    st.rerun()
-                else:
-                    st.error("Email o contraseña incorrectos.")
-    with col2:
-        if st.button("Registrarme", use_container_width=True):
-            st.session_state.auth_mode = "register"
-            st.rerun()
+                st.error("Email o contraseña incorrectos.")
+    if st.button("Registrarme", use_container_width=True):
+        st.session_state.auth_mode = "register"
+        st.rerun()
     st.markdown("---")
     st.caption("¿Quieres probar sin registrarte?")
     if st.button("🎯 Entrar en modo Demo", use_container_width=True):
@@ -372,11 +371,13 @@ def pagina_login():
 def pagina_registro():
     st.markdown('<div class="auth-box">', unsafe_allow_html=True)
     st.markdown("## 📝 Crear cuenta gratis")
-    name = st.text_input("Nombre", placeholder="Tu nombre", key="reg_name")
-    email = st.text_input("Email", placeholder="tu@email.com", key="reg_email")
-    pw1 = st.text_input("Contraseña", type="password", key="reg_pw1")
-    pw2 = st.text_input("Confirmar contraseña", type="password", key="reg_pw2")
-    if st.button("Crear cuenta", use_container_width=True, type="primary"):
+    with st.form("register_form"):
+        name = st.text_input("Nombre", placeholder="Tu nombre", key="reg_name")
+        email = st.text_input("Email", placeholder="tu@email.com", key="reg_email")
+        pw1 = st.text_input("Contraseña", type="password", key="reg_pw1")
+        pw2 = st.text_input("Confirmar contraseña", type="password", key="reg_pw2")
+        submitted = st.form_submit_button("Crear cuenta", use_container_width=True, type="primary")
+    if submitted:
         if not all([name, email, pw1, pw2]):
             st.error("Completa todos los campos.")
         elif pw1 != pw2:
@@ -581,16 +582,17 @@ def tab_analizar(mods):
                 st.rerun()
             return
 
-    col1, col2 = st.columns([2, 1])
-    with col1:
-        nicho = st.text_input("🎯 Nicho / Sector", placeholder="Ej: Hamburgueserías, Cafeterías, Gimnasios…")
-    with col2:
-        ubicacion = st.text_input("📍 Ciudad", placeholder="Madrid, Barcelona, CDMX…")
+    with st.form("analisis_form"):
+        col1, col2 = st.columns([2, 1])
+        with col1:
+            nicho = st.text_input("🎯 Nicho / Sector", placeholder="Ej: Hamburgueserías, Cafeterías, Gimnasios…")
+        with col2:
+            ubicacion = st.text_input("📍 Ciudad", placeholder="Madrid, Barcelona, CDMX…")
+        if demo:
+            st.info("🎯 **Modo Demo** — mostrando datos de ejemplo. Configura tus API keys en Streamlit Secrets para datos reales.")
+        analizar = st.form_submit_button("🚀 Analizar Mercado", type="primary", use_container_width=True)
 
-    if demo:
-        st.info("🎯 **Modo Demo** — mostrando datos de ejemplo. Configura tus API keys en Streamlit Secrets para datos reales.")
-
-    if not st.button("🚀 Analizar Mercado", type="primary", use_container_width=True):
+    if not analizar:
         return
     if not nicho or not ubicacion:
         st.warning("Escribe un nicho y una ciudad.")
